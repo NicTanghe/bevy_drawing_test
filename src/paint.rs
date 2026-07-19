@@ -38,22 +38,6 @@ pub struct BrushSample {
     pub tool: Tool,
 }
 
-impl BrushSample {
-    fn interpolate(self, other: Self, amount: f32) -> Self {
-        let pressure = match (self.pressure, other.pressure) {
-            (Some(a), Some(b)) => Some(a.lerp(b, amount)),
-            (_, pressure) => pressure.or(self.pressure),
-        };
-
-        Self {
-            position: self.position.lerp(other.position, amount),
-            pressure,
-            tilt: self.tilt.lerp(other.tilt, amount),
-            tool: other.tool,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct BrushShape {
     /// Half-size in logical window pixels. X is the tilt-facing major axis.
@@ -91,6 +75,21 @@ impl BrushShape {
             opacity,
         }
     }
+
+    fn interpolate(self, other: Self, amount: f32) -> Self {
+        let angle_delta = (other.angle - self.angle + std::f32::consts::PI)
+            .rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        Self {
+            half_size: self.half_size.lerp(other.half_size, amount),
+            angle: self.angle + angle_delta * amount,
+            opacity: self.opacity.lerp(other.opacity, amount),
+        }
+    }
+
+    pub fn dab_spacing(self) -> f32 {
+        (self.half_size.min_element() * 0.32).max(0.7)
+    }
 }
 
 #[derive(Resource)]
@@ -114,15 +113,6 @@ struct PixelRect {
     min: UVec2,
     /// Exclusive bottom-right pixel.
     max: UVec2,
-}
-
-impl PixelRect {
-    fn intersects(self, other: Self) -> bool {
-        self.min.x < other.max.x
-            && self.max.x > other.min.x
-            && self.min.y < other.max.y
-            && self.max.y > other.min.y
-    }
 }
 
 impl PaintCanvas {
@@ -235,40 +225,40 @@ impl PaintCanvas {
             return;
         };
 
+        let from_shape = BrushShape::from_sample(from, nominal_diameter);
+        let to_shape = BrushShape::from_sample(to, nominal_diameter);
         let distance = from.position.distance(to.position);
         if distance <= f32::EPSILON {
-            self.stamp(to, nominal_diameter, viewport_size);
+            self.stamp_shape(to.position, to.tool, to_shape, viewport_size);
             return;
         }
 
-        let from_shape = BrushShape::from_sample(from, nominal_diameter);
-        let to_shape = BrushShape::from_sample(to, nominal_diameter);
-        let spacing = from_shape
-            .half_size
-            .min_element()
-            .min(to_shape.half_size.min_element())
-            .mul_add(0.32, 0.0)
-            .max(0.7);
-        let steps = (distance / spacing).ceil().max(1.0) as usize;
+        let spacing = from_shape.dab_spacing().min(to_shape.dab_spacing());
+        let steps = (distance / spacing).floor().max(1.0) as usize;
 
         for step in 1..=steps {
             let amount = step as f32 / steps as f32;
-            self.stamp(
-                from.interpolate(to, amount),
-                nominal_diameter,
+            self.stamp_shape(
+                from.position.lerp(to.position, amount),
+                to.tool,
+                from_shape.interpolate(to_shape, amount),
                 viewport_size,
             );
         }
     }
 
     fn stamp(&mut self, sample: BrushSample, nominal_diameter: f32, viewport_size: Vec2) {
+        let shape = BrushShape::from_sample(sample, nominal_diameter);
+        self.stamp_shape(sample.position, sample.tool, shape, viewport_size);
+    }
+
+    fn stamp_shape(&mut self, position: Vec2, tool: Tool, shape: BrushShape, viewport_size: Vec2) {
         if viewport_size.x <= 0.0 || viewport_size.y <= 0.0 {
             return;
         }
 
-        let shape = BrushShape::from_sample(sample, nominal_diameter);
         let scale = self.size.as_vec2() / viewport_size;
-        let center = sample.position * scale;
+        let center = position * scale;
         let (sin, cos) = shape.angle.sin_cos();
 
         // Transform the rotated ellipse's screen-space bounds into texture pixels.
@@ -287,30 +277,46 @@ impl PaintCanvas {
         let max_x = raw_max.x.ceil().min(self.size.x as f32 - 1.0) as u32;
         let min_y = raw_min.y.floor().max(0.0) as u32;
         let max_y = raw_max.y.ceil().min(self.size.y as f32 - 1.0) as u32;
-        let target = match sample.tool {
+        let target = match tool {
             Tool::Pen => INK,
             Tool::Eraser => self.background,
         };
 
-        for y in min_y..=max_y {
-            for x in min_x..=max_x {
-                // Evaluate the ellipse in logical screen pixels so brush geometry
-                // stays correct even when the window and texture have different aspects.
-                let offset = (Vec2::new(x as f32 + 0.5, y as f32 + 0.5) - center) / scale;
-                let local = Vec2::new(
-                    cos * offset.x + sin * offset.y,
-                    -sin * offset.x + cos * offset.y,
-                );
-                let normalized = (local / shape.half_size).length();
-                let coverage =
-                    ((1.0 - normalized) * shape.half_size.min_element() + 0.5).clamp(0.0, 1.0);
-                if coverage <= 0.0 {
-                    continue;
-                }
+        // Most pixels are either completely inside or completely outside the
+        // ellipse. Compare squared radii first and pay for a square root only
+        // in the one-pixel antialiasing fringe.
+        let feather = shape.half_size.min_element();
+        let inner_radius = (1.0 - 0.5 / feather).max(0.0);
+        let outer_radius = 1.0 + 0.5 / feather;
+        let inner_radius_squared = inner_radius * inner_radius;
+        let outer_radius_squared = outer_radius * outer_radius;
+        let inverse_scale = scale.recip();
+        let inverse_half_size = shape.half_size.recip();
+        let normalized_step_x = cos * inverse_scale.x * inverse_half_size.x;
+        let normalized_step_y = -sin * inverse_scale.x * inverse_half_size.y;
 
-                let alpha = coverage * shape.opacity;
-                let index = ((y * self.size.x + x) * 4) as usize;
-                blend_pixel(&mut self.pixels[index..index + 4], target, alpha);
+        for y in min_y..=max_y {
+            let offset = Vec2::new(
+                (min_x as f32 + 0.5 - center.x) * inverse_scale.x,
+                (y as f32 + 0.5 - center.y) * inverse_scale.y,
+            );
+            let mut normalized_x = (cos * offset.x + sin * offset.y) * inverse_half_size.x;
+            let mut normalized_y = (-sin * offset.x + cos * offset.y) * inverse_half_size.y;
+
+            for x in min_x..=max_x {
+                let normalized_squared = normalized_x * normalized_x + normalized_y * normalized_y;
+                if normalized_squared < outer_radius_squared {
+                    let coverage = if normalized_squared <= inner_radius_squared {
+                        1.0
+                    } else {
+                        ((1.0 - normalized_squared.sqrt()) * feather + 0.5).clamp(0.0, 1.0)
+                    };
+                    let alpha = coverage * shape.opacity;
+                    let index = ((y * self.size.x + x) * 4) as usize;
+                    blend_pixel(&mut self.pixels[index..index + 4], target, alpha);
+                }
+                normalized_x += normalized_step_x;
+                normalized_y += normalized_step_y;
             }
         }
         self.mark_dirty(PixelRect {
@@ -320,12 +326,16 @@ impl PaintCanvas {
     }
 
     fn mark_dirty(&mut self, rect: PixelRect) {
-        for (tile_index, tile) in self.tiles.iter().enumerate() {
-            let tile_rect = PixelRect {
-                min: tile.origin,
-                max: tile.origin + tile.size,
-            };
-            if rect.intersects(tile_rect) {
+        if self.dirty_tiles.is_empty() {
+            return;
+        }
+
+        let columns = self.size.x.div_ceil(TILE_SIZE);
+        let min_tile = rect.min / TILE_SIZE;
+        let max_tile = (rect.max - UVec2::ONE) / TILE_SIZE;
+        for tile_y in min_tile.y..=max_tile.y {
+            for tile_x in min_tile.x..=max_tile.x {
+                let tile_index = (tile_y * columns + tile_x) as usize;
                 self.dirty_tiles[tile_index] = true;
             }
         }
@@ -344,11 +354,20 @@ pub enum PaintOperation {
 }
 
 fn blend_pixel(pixel: &mut [u8], target: [u8; 4], alpha: f32) {
-    let alpha = alpha.clamp(0.0, 1.0);
+    let alpha = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
+    if alpha == 0 {
+        return;
+    }
+    if alpha == 255 {
+        pixel.copy_from_slice(&target);
+        return;
+    }
+
+    let inverse_alpha = 255 - alpha;
     for channel in 0..3 {
-        let old = pixel[channel] as f32;
-        let new = target[channel] as f32;
-        pixel[channel] = old.lerp(new, alpha).round() as u8;
+        let old = pixel[channel] as u32;
+        let new = target[channel] as u32;
+        pixel[channel] = ((old * inverse_alpha + new * alpha + 127) / 255) as u8;
     }
     pixel[3] = u8::MAX;
 }

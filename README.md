@@ -6,6 +6,10 @@ buffer, so long strokes stay cheap and the eraser restores actual canvas pixels.
 The display is split into 256×256 tiles, so a brush dab uploads only the touched
 tiles rather than the entire 6.4 MB canvas.
 
+The default interactive mode also disables Bevy's one-frame pipelined renderer,
+uses a one-frame surface queue, and presents without vsync to minimize pen-to-ink
+latency.
+
 The workspace selects the stable Rust toolchain from `rust-toolchain.toml`.
 This is intentional: the 2026-07-11 Rust 1.99 nightly miscompiles Taffy 0.10.1's
 compact layout lengths in optimized builds and makes Bevy UI panic at startup.
@@ -13,7 +17,7 @@ compact layout lengths in optimized builds and makes Bevy UI panic at startup.
 ## Run
 
 ```bash
-cargo run
+cargo run --release
 ```
 
 ## Controls
@@ -24,6 +28,9 @@ cargo run
 - Right mouse drag: erase with the mouse fallback.
 - Shift + drag with either tool: resize that tool. Right/up grows; left/down shrinks.
 - `C`: clear the canvas.
+- `V`: toggle between the default low-latency presentation and vsync.
 
 Pressure changes footprint size and opacity. Tilt stretches the oval toward the
 reported tilt direction. The colored outline previews the live brush footprint.
+Low-latency presentation may tear on some displays; press `V` if you prefer
+tear-free vsync.

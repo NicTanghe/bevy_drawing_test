@@ -1,5 +1,7 @@
 mod paint;
 
+use std::num::NonZeroU32;
+
 use bevy::{
     input::{
         ButtonState,
@@ -8,7 +10,9 @@ use bevy::{
     },
     math::Isometry2d,
     prelude::*,
-    window::{CursorLeft, CursorMoved, PrimaryWindow, WindowPlugin},
+    render::pipelined_rendering::PipelinedRenderingPlugin,
+    window::{CursorLeft, CursorMoved, PresentMode, PrimaryWindow, WindowPlugin},
+    winit::WinitSettings,
 };
 use paint::{BrushSample, BrushShape, PaintCanvas, PaintOperation, Tool};
 
@@ -18,22 +22,31 @@ const MIN_BRUSH_SIZE: f32 = 2.0;
 const MAX_BRUSH_SIZE: f32 = 180.0;
 
 fn main() {
-    App::new()
-        .insert_resource(ClearColor(Color::srgb_u8(248, 247, 244)))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+    let default_plugins = DefaultPlugins
+        .build()
+        .set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Tilt Paint".into(),
                 resolution: (START_WIDTH, START_HEIGHT).into(),
+                present_mode: PresentMode::AutoNoVsync,
+                desired_maximum_frame_latency: NonZeroU32::new(1),
                 ..default()
             }),
             ..default()
-        }))
+        })
+        .disable::<PipelinedRenderingPlugin>();
+
+    App::new()
+        .insert_resource(ClearColor(Color::srgb_u8(248, 247, 244)))
+        .insert_resource(WinitSettings::continuous())
+        .add_plugins(default_plugins)
         .init_resource::<BrushSettings>()
         .init_resource::<PaintInputState>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
+                toggle_vsync,
                 collect_paint_input,
                 fit_canvas_to_window,
                 draw_brush_preview,
@@ -429,6 +442,21 @@ fn collect_paint_input(
     canvas.upload_dirty(&mut images);
 }
 
+fn toggle_vsync(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut window: Single<&mut Window, With<PrimaryWindow>>,
+) {
+    if keys.just_pressed(KeyCode::KeyV) {
+        window.present_mode = match window.present_mode {
+            PresentMode::AutoNoVsync | PresentMode::Immediate | PresentMode::Mailbox => {
+                PresentMode::AutoVsync
+            }
+            _ => PresentMode::AutoNoVsync,
+        };
+        info!("presentation mode: {:?}", window.present_mode);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_active_sample(
     source: PointerSource,
@@ -475,10 +503,19 @@ fn handle_active_sample(
         .tracker_mut(source)
         .last
         .filter(|last| last.tool == sample.tool);
+    let nominal_diameter = settings.size(sample.tool);
+    if let Some(last) = last {
+        let spacing = BrushShape::from_sample(last, nominal_diameter)
+            .dab_spacing()
+            .min(BrushShape::from_sample(sample, nominal_diameter).dab_spacing());
+        if last.position.distance(sample.position) < spacing {
+            return;
+        }
+    }
     operations.push(PaintOperation::Stroke {
         from: last,
         to: sample,
-        nominal_diameter: settings.size(sample.tool),
+        nominal_diameter,
         viewport_size,
     });
     input.tracker_mut(source).last = Some(sample);
@@ -608,7 +645,7 @@ fn update_hud(
     };
     let content = format!(
         "{}  •  {:.0} px  •  pressure {}  •  tilt {:.0}°  •  {}{}\n\
-         LMB pen   RMB / barrel / eraser tip erase   Shift + drag sizes   C clears",
+         LMB pen   RMB / barrel / eraser tip erase   Shift + drag sizes   C clears   V vsync",
         input.active_tool.label(),
         settings.size(input.active_tool),
         pressure,
@@ -642,5 +679,57 @@ mod tests {
         assert_eq!(pen_tool(PenToolKind::Eraser, false), Tool::Eraser);
         assert_eq!(pen_tool(PenToolKind::Pen, true), Tool::Eraser);
         assert_eq!(pen_tool(PenToolKind::Pen, false), Tool::Pen);
+    }
+
+    #[test]
+    fn sub_spacing_input_does_not_repaint_the_same_dab() {
+        let mut input = PaintInputState::default();
+        let mut settings = BrushSettings::default();
+        let mut operations = Vec::new();
+        let viewport = Vec2::new(1_200.0, 750.0);
+        let first = BrushSample {
+            position: Vec2::new(100.0, 100.0),
+            pressure: Some(0.7),
+            tilt: Vec2::ZERO,
+            tool: Tool::Pen,
+        };
+
+        handle_active_sample(
+            PointerSource::Pen,
+            first,
+            false,
+            viewport,
+            &mut input,
+            &mut settings,
+            &mut operations,
+        );
+        handle_active_sample(
+            PointerSource::Pen,
+            BrushSample {
+                position: first.position + Vec2::splat(0.1),
+                pressure: Some(0.72),
+                ..first
+            },
+            false,
+            viewport,
+            &mut input,
+            &mut settings,
+            &mut operations,
+        );
+        assert_eq!(operations.len(), 1);
+
+        handle_active_sample(
+            PointerSource::Pen,
+            BrushSample {
+                position: first.position + Vec2::new(8.0, 0.0),
+                ..first
+            },
+            false,
+            viewport,
+            &mut input,
+            &mut settings,
+            &mut operations,
+        );
+        assert_eq!(operations.len(), 2);
     }
 }
