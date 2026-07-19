@@ -1,8 +1,10 @@
 # Tilt Paint
 
 A small pressure- and tilt-sensitive drawing canvas built against the local
-`../Hamerons_bevy` checkout. The paint lives in one CPU-backed texture, so long
-strokes stay cheap and the eraser restores actual canvas pixels.
+`../Hamerons_bevy` checkout. The master canvas lives in one CPU-backed RAM
+buffer, so long strokes stay cheap and the eraser restores actual canvas pixels.
+The display is split into 256×256 tiles, so a brush dab uploads only the touched
+tiles rather than the entire 6.4 MB canvas.
 
 The workspace selects the stable Rust toolchain from `rust-toolchain.toml`.
 This is intentional: the 2026-07-11 Rust 1.99 nightly miscompiles Taffy 0.10.1's

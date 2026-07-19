@@ -162,7 +162,10 @@ impl PaintInputState {
 }
 
 #[derive(Component)]
-struct CanvasSurface;
+struct CanvasTileSprite {
+    origin: UVec2,
+    size: UVec2,
+}
 
 #[derive(Component)]
 struct HudText;
@@ -175,9 +178,22 @@ fn setup(
     commands.spawn(Camera2d);
 
     let canvas = PaintCanvas::new(&mut images);
-    let mut sprite = Sprite::from_image(canvas.image.clone());
-    sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
-    commands.spawn((CanvasSurface, sprite));
+    let window_size = Vec2::new(window.width(), window.height());
+    for tile in canvas.tiles() {
+        let tile_component = CanvasTileSprite {
+            origin: tile.origin,
+            size: tile.size,
+        };
+        let (display_size, position) =
+            canvas_tile_layout(&tile_component, canvas.size().as_vec2(), window_size);
+        let mut sprite = Sprite::from_image(tile.image.clone());
+        sprite.custom_size = Some(display_size);
+        commands.spawn((
+            tile_component,
+            sprite,
+            Transform::from_xyz(position.x, position.y, 0.0),
+        ));
+    }
     commands.insert_resource(canvas);
 
     commands.spawn((
@@ -205,7 +221,7 @@ fn collect_paint_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     window: Single<&Window, With<PrimaryWindow>>,
-    canvas: Res<PaintCanvas>,
+    mut canvas: ResMut<PaintCanvas>,
     mut images: ResMut<Assets<Image>>,
     mut settings: ResMut<BrushSettings>,
     mut input: ResMut<PaintInputState>,
@@ -214,10 +230,8 @@ fn collect_paint_input(
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let mut operations = Vec::new();
 
-    if !shift {
-        if let Some(gesture) = input.sizing.take() {
-            input.tracker_mut(gesture.source).last = None;
-        }
+    if !shift && let Some(gesture) = input.sizing.take() {
+        input.tracker_mut(gesture.source).last = None;
     }
 
     for event in pen_events.read() {
@@ -370,23 +384,25 @@ fn collect_paint_input(
         }
     }
 
-    if mouse_started && mouse_down && !painted_mouse_move {
-        if let Some(position) = input.mouse_position {
-            handle_active_sample(
-                PointerSource::Mouse,
-                BrushSample {
-                    position,
-                    pressure: None,
-                    tilt: Vec2::ZERO,
-                    tool: mouse_tool,
-                },
-                shift,
-                viewport_size,
-                &mut input,
-                &mut settings,
-                &mut operations,
-            );
-        }
+    if mouse_started
+        && mouse_down
+        && !painted_mouse_move
+        && let Some(position) = input.mouse_position
+    {
+        handle_active_sample(
+            PointerSource::Mouse,
+            BrushSample {
+                position,
+                pressure: None,
+                tilt: Vec2::ZERO,
+                tool: mouse_tool,
+            },
+            shift,
+            viewport_size,
+            &mut input,
+            &mut settings,
+            &mut operations,
+        );
     }
     if mouse_ended || !mouse_down {
         input.end_stroke(PointerSource::Mouse);
@@ -407,12 +423,10 @@ fn collect_paint_input(
     if operations.is_empty() {
         return;
     }
-    let Some(mut image) = images.get_mut(&canvas.image) else {
-        return;
-    };
     for operation in operations {
-        canvas.apply(&mut image, operation);
+        canvas.apply(operation);
     }
+    canvas.upload_dirty(&mut images);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -514,12 +528,34 @@ fn pen_tilt(data: &PenData) -> Vec2 {
 
 fn fit_canvas_to_window(
     window: Single<&Window, With<PrimaryWindow>>,
-    mut sprite: Single<&mut Sprite, With<CanvasSurface>>,
+    canvas: Res<PaintCanvas>,
+    mut tiles: Query<(&CanvasTileSprite, &mut Sprite, &mut Transform)>,
 ) {
-    let size = Vec2::new(window.width(), window.height());
-    if sprite.custom_size != Some(size) {
-        sprite.custom_size = Some(size);
+    let window_size = Vec2::new(window.width(), window.height());
+    let canvas_size = canvas.size().as_vec2();
+    for (tile, mut sprite, mut transform) in &mut tiles {
+        let (display_size, position) = canvas_tile_layout(tile, canvas_size, window_size);
+        if sprite.custom_size != Some(display_size) {
+            sprite.custom_size = Some(display_size);
+        }
+        if transform.translation.xy() != position {
+            transform.translation = position.extend(0.0);
+        }
     }
+}
+
+fn canvas_tile_layout(
+    tile: &CanvasTileSprite,
+    canvas_size: Vec2,
+    window_size: Vec2,
+) -> (Vec2, Vec2) {
+    let display_size = tile.size.as_vec2() / canvas_size * window_size;
+    let center = (tile.origin.as_vec2() + tile.size.as_vec2() * 0.5) / canvas_size;
+    let position = Vec2::new(
+        (center.x - 0.5) * window_size.x,
+        (0.5 - center.y) * window_size.y,
+    );
+    (display_size, position)
 }
 
 fn draw_brush_preview(
