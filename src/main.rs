@@ -11,7 +11,7 @@ use bevy::{
     math::Isometry2d,
     prelude::*,
     render::pipelined_rendering::PipelinedRenderingPlugin,
-    window::{CursorLeft, CursorMoved, PresentMode, PrimaryWindow, WindowPlugin},
+    window::{CursorLeft, CursorMoved, CursorOptions, PresentMode, PrimaryWindow, WindowPlugin},
     winit::WinitSettings,
 };
 use paint::{BrushSample, BrushShape, PaintCanvas, PaintOperation, Tool};
@@ -187,7 +187,9 @@ fn setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     window: Single<&Window, With<PrimaryWindow>>,
+    mut cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
+    cursor_options.visible = false;
     commands.spawn(Camera2d);
 
     let canvas = PaintCanvas::new(&mut images);

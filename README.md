@@ -31,6 +31,7 @@ cargo run --release
 - `V`: toggle between the default low-latency presentation and vsync.
 
 Pressure changes footprint size and opacity. Tilt stretches the oval toward the
-reported tilt direction. The colored outline previews the live brush footprint.
+reported tilt direction. The normal system pointer is hidden over the window;
+the colored outline is the live brush pointer and footprint.
 Low-latency presentation may tear on some displays; press `V` if you prefer
 tear-free vsync.
