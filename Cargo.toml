@@ -1,0 +1,7 @@
+[package]
+name = "drawing_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { path = "../Hamerons_bevy", default-features = false, features = ["2d", "ui", "pen"] }

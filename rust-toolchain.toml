@@ -1,0 +1,6 @@
+[toolchain]
+# Taffy 0.10.1's compact tagged lengths are currently miscompiled by the
+# 2026-07-11 Rust 1.99 nightly in optimized builds. Bevy requires stable 1.96+;
+# following stable keeps release UI layout on the supported compiler channel.
+channel = "stable"
+profile = "minimal"
